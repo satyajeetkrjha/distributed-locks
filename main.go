@@ -7,7 +7,6 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"net/url"
 	"sort"
 	"sync"
 	"time"
@@ -24,7 +23,7 @@ type webHandler struct {
 
 func acquireLock(name string) error {
 
-	resp, err := http.Get("http://localhost:80/acquire-lock?name=" + (url.Values{"name": []string{name}}).Encode())
+	resp, err := http.Get("http://localhost:80/acquire-lock?name=" + name)
 	fmt.Println("resp is ", resp)
 	if err != nil {
 		return fmt.Errorf("making http query %v", err)
@@ -41,17 +40,20 @@ func acquireLock(name string) error {
 }
 
 func releaseLock(name string) error {
-	resp, err := http.Get("http://localhost:80/acquire-lock?name=" + name)
+
+	resp, err := http.Get("http://localhost:80/release-lock?name=" + name)
 	if err != nil {
 		return fmt.Errorf("making http query %v", err)
 	}
 
 	defer resp.Body.Close()
 	respBody, _ := ioutil.ReadAll(resp.Body)
+	fmt.Println("release lock called")
 
 	if resp.StatusCode == http.StatusOK {
 		return nil
 	}
+	fmt.Println("status code is ", resp.StatusCode)
 	return fmt.Errorf("unexpected response: status code %d, contents: %v", resp.StatusCode, string(respBody))
 }
 
@@ -89,8 +91,9 @@ func (h *webHandler) ReleaseLock(w http.ResponseWriter, req *http.Request) {
 
 	h.Lock()
 	defer h.Unlock()
-
+	fmt.Println("name of lock is ", name)
 	delete(h.activeLocks, name)
+	fmt.Println(h.activeLocks)
 	w.Write([]byte("Success releasing lock"))
 
 }
@@ -135,10 +138,6 @@ func main() {
 	}
 	defer releaseLock(*name)
 	log.Printf("Sleeping for one minute")
-	time.Sleep(time.Second)
-
-}
-
-func startServer() {
+	time.Sleep(time.Second * 30)
 
 }
