@@ -8,4 +8,5 @@ go run main.go --name=lock3
 
 <br></br>
 #on other terminal start server and hit
+<br></br>
 go run main.go -server
