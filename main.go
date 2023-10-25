@@ -26,8 +26,8 @@ type webHandler struct {
 
 func acquireLock(name string) error {
 
+	log.Printf("Acquiring lock %s", name)
 	resp, err := http.Get("http://localhost:80/acquire-lock?name=" + name)
-	fmt.Println("resp is ", resp)
 	if err != nil {
 		return fmt.Errorf("making http query %v", err)
 	}
@@ -44,6 +44,7 @@ func acquireLock(name string) error {
 
 func releaseLock(name string) error {
 
+	log.Printf("Releasing lock %s", name)
 	resp, err := http.Get("http://localhost:80/release-lock?name=" + name)
 	if err != nil {
 		return fmt.Errorf("making http query %v", err)
@@ -140,6 +141,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	defer releaseLock(*name)
 	ch := make(chan os.Signal, 5)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 
