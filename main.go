@@ -7,8 +7,11 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -136,7 +139,16 @@ func main() {
 	if err := acquireLock(*name); err != nil {
 		log.Fatal(err)
 	}
-	defer releaseLock(*name)
+
+	ch := make(chan os.Signal, 5)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-ch
+		releaseLock(*name)
+		os.Exit(0)
+	}()
+
 	log.Printf("Sleeping for one minute")
 	time.Sleep(time.Second * 30)
 
