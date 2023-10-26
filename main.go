@@ -7,9 +7,11 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -21,13 +23,21 @@ var errLocked = errors.New("Lock is already active")
 
 type webHandler struct {
 	sync.RWMutex
-	activeLocks map[string]bool
+	activeLocks map[string]time.Time
 }
 
-func acquireLock(name string) error {
+func acquireLock(name string, timeout time.Duration) error {
 
 	log.Printf("Acquiring lock %s", name)
-	resp, err := http.Get("http://localhost:80/acquire-lock?name=" + name)
+
+	u := url.Values{
+		"name":    []string{name},
+		"timeout": []string{strconv.Itoa(int(timeout / time.Second))},
+	}
+
+	fmt.Println("u.Encode is ", u.Encode())
+
+	resp, err := http.Get("http://localhost:80/acquire-lock?" + u.Encode())
 	if err != nil {
 		return fmt.Errorf("making http query %v", err)
 	}
@@ -71,23 +81,46 @@ func (h *webHandler) AcquireLock(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	timeout := req.Form.Get("timeout")
+
+	fmt.Println("---------" + name + "----------" + timeout)
+	if timeout == "" {
+		http.Error(w, "timeout in seconds is required", http.StatusBadRequest)
+		return
+	}
+
+	fmt.Println("............", timeout)
+	timeoutSec, err := strconv.ParseInt(timeout, 10, 64)
+	fmt.Println("timeout in seconds ", timeoutSec)
+	if err != nil || timeoutSec < 0 {
+		http.Error(w, "timeout must be integer", http.StatusBadRequest)
+		return
+	}
+
 	h.Lock()
 	defer h.Unlock()
 
-	if h.activeLocks[name] != false {
-		http.Error(w, "lock is already active", http.StatusConflict)
+	now := time.Now()
+
+	if endTime, ok := h.activeLocks[name]; ok && endTime.After(now) {
+		http.Error(w, fmt.Sprintf("lock is already active (%s left)", endTime.Sub(now)), http.StatusConflict)
 		return
 	}
-	h.activeLocks[name] = true
+
+	fmt.Println("name of lock acquired is " + name)
+
+	h.activeLocks[name] = time.Now().Add(time.Duration(timeoutSec) * time.Second)
 	w.Write([]byte("Success"))
 }
 
 func (h *webHandler) ReleaseLock(w http.ResponseWriter, req *http.Request) {
 
+	fmt.Println("We are inside release lock........")
 	req.ParseForm()
 
 	name := req.Form.Get("name")
 
+	fmt.Println("inside ........................ ", name)
 	if name == "" {
 		http.Error(w, "lock name is required", http.StatusBadRequest)
 		return
@@ -98,6 +131,7 @@ func (h *webHandler) ReleaseLock(w http.ResponseWriter, req *http.Request) {
 	fmt.Println("name of lock is ", name)
 	delete(h.activeLocks, name)
 	fmt.Println(h.activeLocks)
+	fmt.Println("lock has been released.....")
 	w.Write([]byte("Success releasing lock"))
 
 }
@@ -128,7 +162,7 @@ func main() {
 
 	if *server {
 		h := &webHandler{
-			activeLocks: make(map[string]bool),
+			activeLocks: make(map[string]time.Time),
 		}
 		fmt.Println("Server is up and running .......")
 		http.Handle("/", http.HandlerFunc(h.listLocks))
@@ -137,7 +171,7 @@ func main() {
 		log.Fatal(http.ListenAndServe(":80", nil))
 	}
 
-	if err := acquireLock(*name); err != nil {
+	if err := acquireLock(*name, time.Minute); err != nil {
 		log.Fatal(err)
 	}
 
