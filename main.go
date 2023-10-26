@@ -21,17 +21,23 @@ var server = flag.Bool("server", false, "Run as server")
 var name = flag.String("name", "default_lock", "Name of the lock")
 var errLocked = errors.New("Lock is already active")
 
-type webHandler struct {
-	sync.RWMutex
-	activeLocks map[string]time.Time
+type lockInfo struct {
+	owner string
+	end   time.Time
 }
 
-func acquireLock(name string, timeout time.Duration) error {
+type webHandler struct {
+	sync.RWMutex
+	activeLocks map[string]lockInfo
+}
+
+func acquireLock(name string, owner string, timeout time.Duration) error {
 
 	log.Printf("Acquiring lock %s", name)
 
 	u := url.Values{
 		"name":    []string{name},
+		"owner":   []string{owner},
 		"timeout": []string{strconv.Itoa(int(timeout / time.Second))},
 	}
 
@@ -52,10 +58,15 @@ func acquireLock(name string, timeout time.Duration) error {
 	return fmt.Errorf("unexpected response: status code %d, contents: %v", resp.StatusCode, string(respBody))
 }
 
-func releaseLock(name string) error {
+func releaseLock(name string, owner string) error {
 
+	u := url.Values{
+		"name":  []string{name},
+		"owner": []string{owner},
+	}
 	log.Printf("Releasing lock %s", name)
-	resp, err := http.Get("http://localhost:80/release-lock?name=" + name)
+
+	resp, err := http.Get("http://localhost:80/release-lock?" + u.Encode())
 	if err != nil {
 		return fmt.Errorf("making http query %v", err)
 	}
@@ -81,17 +92,22 @@ func (h *webHandler) AcquireLock(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	owner := req.Form.Get("owner")
+
+	if owner == "" {
+		http.Error(w, "Lock Owner name is required", http.StatusBadRequest)
+		return
+	}
+
 	timeout := req.Form.Get("timeout")
 
-	fmt.Println("---------" + name + "----------" + timeout)
 	if timeout == "" {
 		http.Error(w, "timeout in seconds is required", http.StatusBadRequest)
 		return
 	}
 
-	fmt.Println("............", timeout)
 	timeoutSec, err := strconv.ParseInt(timeout, 10, 64)
-	fmt.Println("timeout in seconds ", timeoutSec)
+
 	if err != nil || timeoutSec < 0 {
 		http.Error(w, "timeout must be integer", http.StatusBadRequest)
 		return
@@ -102,36 +118,52 @@ func (h *webHandler) AcquireLock(w http.ResponseWriter, req *http.Request) {
 
 	now := time.Now()
 
-	if endTime, ok := h.activeLocks[name]; ok && endTime.After(now) {
-		http.Error(w, fmt.Sprintf("lock is already active (%s left)", endTime.Sub(now)), http.StatusConflict)
+	li, ok := h.activeLocks[name]
+
+	// if satya is the owner of lock3 and lock3 has not yet expired and john tries to access the lock then he cannot
+	// but if satya tries to acquire the same lock again ,he can and now the expiration time goes up
+	if ok && li.owner != owner && li.end.After(now) {
+		http.Error(w, fmt.Sprintf("lock is already active (%s left)", li.end.Sub(now)), http.StatusConflict)
 		return
 	}
 
-	fmt.Println("name of lock acquired is " + name)
-
-	h.activeLocks[name] = time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	h.activeLocks[name] = lockInfo{
+		owner: owner,
+		end:   time.Now().Add(time.Duration(timeoutSec) * time.Second),
+	}
 	w.Write([]byte("Success"))
 }
 
 func (h *webHandler) ReleaseLock(w http.ResponseWriter, req *http.Request) {
 
-	fmt.Println("We are inside release lock........")
 	req.ParseForm()
 
 	name := req.Form.Get("name")
 
-	fmt.Println("inside ........................ ", name)
 	if name == "" {
 		http.Error(w, "lock name is required", http.StatusBadRequest)
 		return
 	}
 
+	owner := req.Form.Get("owner")
+
+	if owner == "" {
+		http.Error(w, "Lock Owner name is required", http.StatusBadRequest)
+		return
+	}
+
 	h.Lock()
 	defer h.Unlock()
-	fmt.Println("name of lock is ", name)
+
+	if li, ok := h.activeLocks[name]; ok && li.owner != owner {
+		http.Error(w, fmt.Sprintf("lock has another owner %q", li.owner), http.StatusBadRequest)
+		return
+	}
+
+	fmt.Println("lock being deleted is " + name)
 	delete(h.activeLocks, name)
 	fmt.Println(h.activeLocks)
-	fmt.Println("lock has been released.....")
+
 	w.Write([]byte("Success releasing lock"))
 
 }
@@ -151,7 +183,7 @@ func (h *webHandler) listLocks(w http.ResponseWriter, req *http.Request) {
 	sort.Strings(locks)
 
 	for _, name := range locks {
-		w.Write([]byte(name + "\n"))
+		fmt.Fprintf(w, "%s: owned by %q, expires in %s\n", name, h.activeLocks[name].owner, h.activeLocks[name].end.Sub(time.Now()))
 	}
 
 }
@@ -162,7 +194,7 @@ func main() {
 
 	if *server {
 		h := &webHandler{
-			activeLocks: make(map[string]time.Time),
+			activeLocks: make(map[string]lockInfo),
 		}
 		fmt.Println("Server is up and running .......")
 		http.Handle("/", http.HandlerFunc(h.listLocks))
@@ -171,21 +203,26 @@ func main() {
 		log.Fatal(http.ListenAndServe(":80", nil))
 	}
 
-	if err := acquireLock(*name, time.Minute); err != nil {
+	hostname, _ := os.Hostname()
+	owner := fmt.Sprintf("%s:%d", hostname, os.Getpid())
+
+	fmt.Println("owner is ", owner)
+
+	if err := acquireLock(*name, owner, 1*time.Minute); err != nil {
 		log.Fatal(err)
 	}
 
-	defer releaseLock(*name)
+	defer releaseLock(*name, owner)
 	ch := make(chan os.Signal, 5)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-ch
-		releaseLock(*name)
+		releaseLock(*name, owner)
 		os.Exit(0)
 	}()
 
 	log.Printf("Sleeping for one minute")
-	time.Sleep(time.Second * 30)
+	time.Sleep(time.Second * 60)
 
 }
